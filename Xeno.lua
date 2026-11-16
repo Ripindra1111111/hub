@@ -1,6 +1,8 @@
 --[[
-    XenoHub.lua — Full (final)
-    Executor: Xeno (guarded cho executor khác)
+    XenoHub.lua — Scoped FPS Edition v2
+    Executor: Xeno
+    Game: [v1.5] Scoped FPS
+    ESP dùng Drawing (không dùng Highlight — game xóa instance)
 ]]
 
 --=========================================================
@@ -17,23 +19,23 @@ local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
 
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
-    if Workspace.CurrentCamera then
-        Camera = Workspace.CurrentCamera
-    end
+    if Workspace.CurrentCamera then Camera = Workspace.CurrentCamera end
 end)
 
 --=========================================================
 -- EXECUTOR COMPAT
 --=========================================================
 local HAS = {
-    Drawing       = Drawing and Drawing.new ~= nil,
-    HookMeta      = hookmetamethod ~= nil,
-    RawMeta       = getrawmetatable ~= nil,
-    SetReadonly   = setreadonly ~= nil,
-    NewCClosure   = newcclosure ~= nil,
-    Namecall      = getnamecallmethod ~= nil,
-    SetFPSCap     = setfpscap ~= nil,
-    GetHui        = gethui ~= nil,
+    Drawing     = Drawing and Drawing.new ~= nil,
+    HookMeta    = hookmetamethod ~= nil,
+    RawMeta     = getrawmetatable ~= nil,
+    SetReadonly = setreadonly ~= nil,
+    NewCClosure = newcclosure ~= nil,
+    Namecall    = getnamecallmethod ~= nil,
+    SetFPSCap   = setfpscap ~= nil,
+    MouseMove   = mousemoverel ~= nil,
+    MouseClick  = mouse1click ~= nil,
+    GetHui      = gethui ~= nil,
 }
 local function warnMissing(name)
     warn("[XenoHub] Executor thiếu: " .. name .. " — tính năng tương ứng bị tắt")
@@ -43,23 +45,20 @@ end
 -- CONFIG
 --=========================================================
 local Config = {
-    Aimlock = {
-        Enabled = false, FOV = 150, Smooth = 0.35, SmoothCurve = 2.0,
-        MaxTurnSpeed = 12, SwitchDelay = 0.25, Prediction = 0.15,
-        Part = "Head", TeamCheck = true, WallCheck = true, MaxDist = 500,
-        Debug = false,
+    AimAssist = {
+        Enabled = false, FOV = 200, Strength = 0.35, Part = "Head",
+        TeamCheck = true, WallCheck = false, MaxDist = 1000, Debug = false,
     },
+    TriggerBot = { Enabled = false, Delay = 0.05, TeamCheck = true },
     FixLag = { Enabled = false, ClearTerrain = true, DisableEffects = true, CapFPS = 240 },
     SilentAim = {
-        Enabled = false, FOV = 150, Part = "Head",
+        Enabled = false, FOV = 200, Part = "Head",
         TeamCheck = true, Prediction = 0.165, WallCheck = false,
     },
-    Chams = {
+    ESP = {
         Enabled = false, TeamCheck = true,
-        FillColor = Color3.fromRGB(255, 60, 60),
-        OutlineColor = Color3.fromRGB(255, 255, 255),
-        FillTransparency = 0.5, OutlineTransparency = 0,
-        DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        BoxColor = Color3.fromRGB(255, 60, 60),
+        ShowName = true, ShowDistance = true, ShowHealth = true,
     },
     SpeedHack = { Enabled = false, Speed = 50, JumpPower = 100, Method = "velocity", Smooth = true },
     FPSUnlocker = { Enabled = false, Cap = 240 },
@@ -70,7 +69,7 @@ local Config = {
         Enabled = false, Size = 15, Transparency = 0.7, TeamCheck = true,
         Parts = { "Head", "HumanoidRootPart", "UpperTorso", "LowerTorso" },
     },
-    Godmode = { Enabled = false, BlockKillBricks = true, BlockFallDamage = true, BlockHealthDecrease = true },
+    Godmode = { Enabled = false, BlockFallDamage = true, BlockHealthDecrease = true },
     Fullbright = {
         Enabled = false,
         Ambient = Color3.fromRGB(200, 200, 200),
@@ -81,7 +80,7 @@ local Config = {
     FOVChanger = { Enabled = false, Value = 120, Default = 70 },
     FOVCircle = {
         Enabled = false, Thickness = 1, Color = Color3.fromRGB(0, 200, 255),
-        Sides = 64, UseAimlockFOV = true, Value = 150,
+        Sides = 64, UseAimFOV = true, Value = 200,
     },
     Teleport = { Enabled = false, Offset = Vector3.new(0, 0, 3), HeightOffset = 0 },
 }
@@ -105,7 +104,13 @@ end
 local function getPart(plr, partName)
     local char = plr.Character
     if not char then return nil end
-    return char:FindFirstChild(partName) or char:FindFirstChild("HumanoidRootPart")
+    local part = char:FindFirstChild(partName)
+    if part and part:IsA("BasePart") then return part end
+    for _, name in ipairs({ "Head", "UpperTorso", "Torso", "HumanoidRootPart", "LowerTorso" }) do
+        local p = char:FindFirstChild(name)
+        if p and p:IsA("BasePart") then return p end
+    end
+    return nil
 end
 
 local function worldToViewport(pos)
@@ -127,27 +132,27 @@ local function hasLineOfSight(fromPart, toPart, targetChar, enabled)
 end
 
 --=========================================================
--- AIMLOCK (BindToRenderStep Camera+1)
+-- AIM ASSIST (mousemoverel)
 --=========================================================
 local aimTarget, aimTargetPart = nil, nil
-local switchCooldown = 0
 local lastDebugPrint = 0
 
 local function findBestTarget()
-    local best, bestDist = nil, Config.Aimlock.FOV
+    local best, bestDist = nil, Config.AimAssist.FOV
     local center = Camera.ViewportSize / 2
+
     for _, plr in ipairs(Players:GetPlayers()) do
         if plr == LocalPlayer then continue end
         if not isAlive(plr) then continue end
-        if sameTeam(plr, Config.Aimlock.TeamCheck) then continue end
-        local part = getPart(plr, Config.Aimlock.Part)
+        if sameTeam(plr, Config.AimAssist.TeamCheck) then continue end
+        local part = getPart(plr, Config.AimAssist.Part)
         if not part then continue end
         local myChar = LocalPlayer.Character
         if not myChar or not myChar:FindFirstChild("HumanoidRootPart") then continue end
         local myPos = myChar.HumanoidRootPart.Position
         local d = dist(myPos, part.Position)
-        if d > Config.Aimlock.MaxDist then continue end
-        if not hasLineOfSight(myChar.HumanoidRootPart, part, plr.Character, Config.Aimlock.WallCheck) then continue end
+        if d > Config.AimAssist.MaxDist then continue end
+        if not hasLineOfSight(myChar.HumanoidRootPart, part, plr.Character, Config.AimAssist.WallCheck) then continue end
         local screen, onScreen = worldToViewport(part.Position)
         if not onScreen then continue end
         local fovDist = (screen - center).Magnitude
@@ -156,122 +161,176 @@ local function findBestTarget()
     return best
 end
 
-local function easeOut(t, p) return 1 - (1 - t) ^ p end
-local function angleBetween(a, b) return math.acos(math.clamp(a:Dot(b), -1, 1)) end
+RunService.RenderStepped:Connect(function()
+    if not Config.AimAssist.Enabled then
+        aimTarget, aimTargetPart = nil, nil
+        return
+    end
 
-local function predictPosition(plr, part, prediction)
-    if prediction <= 0 then return part.Position end
-    local char = plr.Character
-    if not char then return part.Position end
-    local hrp = char:FindFirstChild("HumanoidRootPart")
-    if not hrp then return part.Position end
-    return part.Position + hrp.AssemblyLinearVelocity * prediction
-end
-
-local function updateTarget(dt)
-    switchCooldown = math.max(0, switchCooldown - dt)
     local newTarget = findBestTarget()
     if newTarget then
-        if aimTarget == nil then
-            aimTarget = newTarget
-            aimTargetPart = getPart(newTarget, Config.Aimlock.Part)
-            switchCooldown = Config.Aimlock.SwitchDelay
-        elseif newTarget ~= aimTarget then
-            if switchCooldown <= 0 then
-                aimTarget = newTarget
-                aimTargetPart = getPart(newTarget, Config.Aimlock.Part)
-                switchCooldown = Config.Aimlock.SwitchDelay
-            end
-        else
-            aimTargetPart = getPart(newTarget, Config.Aimlock.Part)
-        end
+        aimTarget = newTarget
+        aimTargetPart = getPart(newTarget, Config.AimAssist.Part)
     else
         aimTarget, aimTargetPart = nil, nil
     end
-end
 
-RunService:BindToRenderStep("XenoAimlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
-    if not Config.Aimlock.Enabled then
-        aimTarget, aimTargetPart = nil, nil
-        return
-    end
-    updateTarget(dt)
-
-    -- FIX: throttle debug print
-    if Config.Aimlock.Debug and tick() - lastDebugPrint > 0.5 then
+    if Config.AimAssist.Debug and tick() - lastDebugPrint > 0.5 then
         lastDebugPrint = tick()
-        if aimTarget then
-            print("[Aimlock] target:", aimTarget.Name, "part:", aimTargetPart and aimTargetPart.Name or "nil")
-        else
-            print("[Aimlock] no target")
-        end
+        print("[AimAssist] target:", aimTarget and aimTarget.Name or "nil",
+              "part:", aimTargetPart and aimTargetPart.Name or "nil")
     end
 
     if not aimTarget or not aimTargetPart then return end
-    local targetPos = predictPosition(aimTarget, aimTargetPart, Config.Aimlock.Prediction)
-    local camPos = Camera.CFrame.Position
-    local currentDir = Camera.CFrame.LookVector
-    local targetDir = (targetPos - camPos).Unit
-    local angle = angleBetween(currentDir, targetDir)
-    if angle < 0.0001 then return end
-    local baseSpeed = (1 - Config.Aimlock.Smooth)
-    local adaptive = baseSpeed * (0.4 + 0.6 * math.min(angle / math.rad(45), 1))
-    local maxStep = Config.Aimlock.MaxTurnSpeed * dt
-    local step = math.min(adaptive * angle, maxStep)
-    local progress = math.min(step / angle, 1)
-    local eased = easeOut(progress, Config.Aimlock.SmoothCurve)
-    local newDir = currentDir:Lerp(targetDir, eased).Unit
-    Camera.CFrame = CFrame.lookAt(camPos, camPos + newDir)
+
+    local screenPos, onScreen = worldToViewport(aimTargetPart.Position)
+    if not onScreen then return end
+
+    local center = Camera.ViewportSize / 2
+    local delta = screenPos - center
+    if delta.Magnitude < 2 then return end
+
+    if HAS.MouseMove then
+        local s = Config.AimAssist.Strength
+        pcall(function()
+            mousemoverel(delta.X * s, delta.Y * s)
+        end)
+    end
 end)
 
 --=========================================================
--- CHAMS
+-- TRIGGER BOT
 --=========================================================
-local chamsHighlights = {}
-local function createChams(plr)
-    if plr == LocalPlayer or chamsHighlights[plr] or not plr.Character then return end
-    local hl = Instance.new("Highlight")
-    hl.Name = "XenoChams"
-    hl.FillColor = Config.Chams.FillColor
-    hl.OutlineColor = Config.Chams.OutlineColor
-    hl.FillTransparency = Config.Chams.FillTransparency
-    hl.OutlineTransparency = Config.Chams.OutlineTransparency
-    hl.DepthMode = Config.Chams.DepthMode
-    hl.Adornee = plr.Character
-    hl.Parent = plr.Character
-    chamsHighlights[plr] = hl
+local lastTrigger = 0
+RunService.RenderStepped:Connect(function()
+    if not Config.TriggerBot.Enabled then return end
+    if tick() - lastTrigger < Config.TriggerBot.Delay then return end
+    if not HAS.MouseClick then return end
+
+    local mouse = LocalPlayer:GetMouse()
+    if not mouse or not mouse.Target then return end
+
+    local target = mouse.Target
+    local targetPlr = Players:GetPlayerFromCharacter(target.Parent)
+    if not targetPlr or targetPlr == LocalPlayer then return end
+    if not isAlive(targetPlr) then return end
+    if sameTeam(targetPlr, Config.TriggerBot.TeamCheck) then return end
+
+    pcall(function() mouse1click() end)
+    lastTrigger = tick()
+end)
+
+--=========================================================
+-- DRAWING ESP
+--=========================================================
+local espObjects = {}
+
+local function makeDrawing(class, props)
+    if not HAS.Drawing then return nil end
+    local ok, obj = pcall(function()
+        local d = Drawing.new(class)
+        for k, v in pairs(props) do d[k] = v end
+        return d
+    end)
+    return ok and obj or nil
 end
-local function removeChams(plr)
-    local hl = chamsHighlights[plr]
-    if hl then pcall(function() hl:Destroy() end) chamsHighlights[plr] = nil end
+
+local function createESP(plr)
+    if plr == LocalPlayer or espObjects[plr] then return end
+    espObjects[plr] = {
+        box      = makeDrawing("Square", { Thickness=1.5, Color=Config.ESP.BoxColor, Filled=false, Visible=false }),
+        name     = makeDrawing("Text",   { Size=13, Center=true, Outline=true, Color=Color3.fromRGB(255,255,255), Visible=false }),
+        distance = makeDrawing("Text",   { Size=12, Center=true, Outline=true, Color=Color3.fromRGB(200,200,200), Visible=false }),
+        health   = makeDrawing("Text",   { Size=12, Center=true, Outline=true, Color=Color3.fromRGB(0,255,100), Visible=false }),
+    }
 end
-local function refreshChams()
-    if not Config.Chams.Enabled then
-        for plr, _ in pairs(chamsHighlights) do removeChams(plr) end
+
+local function removeESP(plr)
+    local t = espObjects[plr]
+    if not t then return end
+    for _, obj in pairs(t) do
+        if obj then pcall(function() obj:Remove() end) end
+    end
+    espObjects[plr] = nil
+end
+
+local function refreshESP()
+    if not Config.ESP.Enabled then
+        for plr, _ in pairs(espObjects) do removeESP(plr) end
         return
     end
     for _, plr in ipairs(Players:GetPlayers()) do
-        if plr ~= LocalPlayer and isAlive(plr) and not sameTeam(plr, Config.Chams.TeamCheck) then
-            if not chamsHighlights[plr] or chamsHighlights[plr].Adornee ~= plr.Character then
-                removeChams(plr) createChams(plr)
-            else
-                local hl = chamsHighlights[plr]
-                hl.FillColor = Config.Chams.FillColor
-                hl.OutlineColor = Config.Chams.OutlineColor
-                hl.DepthMode = Config.Chams.DepthMode
-            end
+        if plr ~= LocalPlayer and isAlive(plr) and not sameTeam(plr, Config.ESP.TeamCheck) then
+            if not espObjects[plr] then createESP(plr) end
         else
-            removeChams(plr)
+            removeESP(plr)
         end
     end
 end
-Players.PlayerRemoving:Connect(removeChams)
+
+Players.PlayerRemoving:Connect(removeESP)
 task.spawn(function()
-    while true do task.wait(0.5) if Config.Chams.Enabled then refreshChams() end end
+    while true do task.wait(0.5) if Config.ESP.Enabled then refreshESP() end end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if not Config.ESP.Enabled then
+        for _, t in pairs(espObjects) do
+            for _, obj in pairs(t) do if obj then pcall(function() obj.Visible = false end) end end
+        end
+        return
+    end
+
+    for plr, t in pairs(espObjects) do
+        local visible = false
+        if isAlive(plr) and not sameTeam(plr, Config.ESP.TeamCheck) then
+            local hrp = plr.Character and plr.Character:FindFirstChild("HumanoidRootPart")
+            local head = plr.Character and plr.Character:FindFirstChild("Head")
+            if hrp and head then
+                local topPos, topOn = worldToViewport(head.Position + Vector3.new(0, 0.5, 0))
+                local botPos, botOn = worldToViewport(hrp.Position - Vector3.new(0, 3, 0))
+                if topOn or botOn then
+                    visible = true
+                    local height = math.abs(topPos.Y - botPos.Y)
+                    local width = height / 2
+                    local x = math.min(topPos.X, botPos.X) - width / 2
+                    local y = math.min(topPos.Y, botPos.Y)
+                    local myHrp = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
+                    local d = myHrp and (myHrp.Position - hrp.Position).Magnitude or 0
+                    local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+
+                    if t.box then
+                        t.box.Size = Vector2.new(width, height)
+                        t.box.Position = Vector2.new(x, y)
+                        t.box.Color = Config.ESP.BoxColor
+                        t.box.Visible = true
+                    end
+                    if t.name then
+                        t.name.Text = plr.Name
+                        t.name.Position = Vector2.new(x + width / 2, y - 16)
+                        t.name.Visible = Config.ESP.ShowName
+                    end
+                    if t.distance then
+                        t.distance.Text = string.format("[%d]", math.floor(d))
+                        t.distance.Position = Vector2.new(x + width / 2, y + height + 2)
+                        t.distance.Visible = Config.ESP.ShowDistance
+                    end
+                    if t.health and hum then
+                        t.health.Text = string.format("%d HP", math.floor(hum.Health))
+                        t.health.Position = Vector2.new(x + width / 2, y + height + 16)
+                        t.health.Visible = Config.ESP.ShowHealth
+                    end
+                end
+            end
+        end
+        if not visible then
+            for _, obj in pairs(t) do if obj then pcall(function() obj.Visible = false end) end end
+        end
+    end
 end)
 
 --=========================================================
--- SILENT AIM (with URL failure warn)
+-- SILENT AIM
 --=========================================================
 local silentAimModule = nil
 pcall(function()
@@ -286,7 +345,7 @@ pcall(function()
             pcall(function() silentAimModule.TeamCheck(Config.SilentAim.TeamCheck) end)
         end
     else
-        warn("[XenoHub] Silent Aim module không load được — tính năng Silent Aim tắt")
+        warn("[XenoHub] Silent Aim module không load được")
     end
 end)
 
@@ -308,7 +367,7 @@ if HAS.HookMeta and HAS.RawMeta and HAS.NewCClosure then
         return oldIndex(t, k)
     end)
 else
-    warnMissing("hookmetamethod/getrawmetatable/newcclosure (Silent Aim)")
+    warnMissing("hookmetamethod (Silent Aim)")
 end
 
 --=========================================================
@@ -362,7 +421,7 @@ LocalPlayer.CharacterAdded:Connect(function() task.wait(0.5) applySpeedHack() en
 -- FPS UNLOCKER
 --=========================================================
 local function applyFPS()
-    if not HAS.SetFPSCap then warnMissing("setfpscap (FPS Unlock)") return end
+    if not HAS.SetFPSCap then warnMissing("setfpscap") return end
     pcall(function()
         setfpscap(Config.FPSUnlocker.Enabled and Config.FPSUnlocker.Cap or 60)
     end)
@@ -401,10 +460,10 @@ end
 installRapidFire()
 
 --=========================================================
--- NO RECOIL (BindToRenderStep Camera+2)
+-- NO RECOIL
 --=========================================================
 local smoothedCFrame = nil
-RunService:BindToRenderStep("XenoNoRecoil", Enum.RenderPriority.Camera.Value + 2, function()
+RunService.RenderStepped:Connect(function()
     if not Config.NoRecoil.Enabled then
         smoothedCFrame = Camera.CFrame
         return
@@ -427,7 +486,7 @@ RunService:BindToRenderStep("XenoNoRecoil", Enum.RenderPriority.Camera.Value + 2
 end)
 
 --=========================================================
--- ANTI-AIM (Heartbeat + pcall)
+-- ANTI-AIM
 --=========================================================
 local antiAimTime = 0
 RunService.Heartbeat:Connect(function(dt)
@@ -511,7 +570,7 @@ task.spawn(function() while true do task.wait(0.4) refreshAllHitboxes() end end)
 Players.PlayerRemoving:Connect(restoreHitbox)
 
 --=========================================================
--- GODMODE (rawget fix)
+-- GODMODE
 --=========================================================
 local godmodeInstalled = false
 local function installGodmode()
@@ -529,7 +588,6 @@ local function installGodmode()
            and self:IsA("Humanoid") and key == "Health" then
             local myChar = LocalPlayer.Character
             if myChar and self == myChar:FindFirstChildOfClass("Humanoid") then
-                -- FIX: không dùng rawget trên userdata
                 local old = self.Health
                 if type(value) == "number" and type(old) == "number" and value < old then
                     return
@@ -672,7 +730,7 @@ end
 RunService.RenderStepped:Connect(function()
     if not fovCircle then return end
     if not Config.FOVCircle.Enabled then fovCircle.Visible = false return end
-    fovCircle.Radius = Config.FOVCircle.UseAimlockFOV and Config.Aimlock.FOV or Config.FOVCircle.Value
+    fovCircle.Radius = Config.FOVCircle.UseAimFOV and Config.AimAssist.FOV or Config.FOVCircle.Value
     fovCircle.Position = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
     fovCircle.Thickness = Config.FOVCircle.Thickness
     fovCircle.Color = Config.FOVCircle.Color
@@ -863,10 +921,10 @@ local Title = Instance.new("TextLabel")
 Title.Size = UDim2.new(1, -70, 1, 0)
 Title.Position = UDim2.new(0, 10, 0, 0)
 Title.BackgroundTransparency = 1
-Title.Text = "XENO HUB  [RShift]"
+Title.Text = "XENO HUB  [Scoped FPS]"
 Title.TextColor3 = Color3.fromRGB(255, 255, 255)
 Title.Font = Enum.Font.GothamBold
-Title.TextSize = 13
+Title.TextSize = 12
 Title.TextXAlignment = Enum.TextXAlignment.Left
 Title.Parent = TitleBar
 
@@ -1046,8 +1104,9 @@ local VisualTab = createTab("VISUAL")
 local MiscTab   = createTab("MISC")
 
 -- COMBAT
-addToggleToTab(CombatTab, "Aimlock", function() return Config.Aimlock.Enabled end, function(v) Config.Aimlock.Enabled = v end)
+addToggleToTab(CombatTab, "Aim Assist", function() return Config.AimAssist.Enabled end, function(v) Config.AimAssist.Enabled = v end)
 addToggleToTab(CombatTab, "Silent Aim", function() return Config.SilentAim.Enabled end, function(v) Config.SilentAim.Enabled = v end)
+addToggleToTab(CombatTab, "Trigger Bot", function() return Config.TriggerBot.Enabled end, function(v) Config.TriggerBot.Enabled = v end)
 addToggleToTab(CombatTab, "Rapid Fire", function() return Config.RapidFire.Enabled end, function(v) Config.RapidFire.Enabled = v end)
 addToggleToTab(CombatTab, "No Recoil", function() return Config.NoRecoil.Enabled end, function(v) Config.NoRecoil.Enabled = v end)
 addToggleToTab(CombatTab, "Hitbox+", function() return Config.Hitbox.Enabled end, function(v) Config.Hitbox.Enabled = v; refreshAllHitboxes() end)
@@ -1055,7 +1114,7 @@ addToggleToTab(CombatTab, "Anti-Aim+", function() return Config.AntiAim.Enabled 
 addToggleToTab(CombatTab, "FOV Circle", function() return Config.FOVCircle.Enabled end, function(v) Config.FOVCircle.Enabled = v end)
 
 -- VISUAL
-addToggleToTab(VisualTab, "Chams", function() return Config.Chams.Enabled end, function(v) Config.Chams.Enabled = v; refreshChams() end)
+addToggleToTab(VisualTab, "ESP", function() return Config.ESP.Enabled end, function(v) Config.ESP.Enabled = v; refreshESP() end)
 addToggleToTab(VisualTab, "Fullbright", function() return Config.Fullbright.Enabled end, function(v) Config.Fullbright.Enabled = v; applyFullbright() end)
 addToggleToTab(VisualTab, "FOV Changer", function() return Config.FOVChanger.Enabled end, function(v) Config.FOVChanger.Enabled = v; applyFOV() end)
 addToggleToTab(VisualTab, "Fix Lag", function() return Config.FixLag.Enabled end, function(v) Config.FixLag.Enabled = v; if v then applyFixLag() end end)
@@ -1067,20 +1126,19 @@ addToggleToTab(MiscTab, "Godmode", function() return Config.Godmode.Enabled end,
 addToggleToTab(MiscTab, "FPS Unlock", function() return Config.FPSUnlocker.Enabled end, function(v) Config.FPSUnlocker.Enabled = v; applyFPS() end)
 addToggleToTab(MiscTab, "Teleport UI", function() return PlayerListFrame.Visible end, function(v) PlayerListFrame.Visible = v; if v then refreshPlayerList() end end)
 addToggleToTab(MiscTab, "Team Check",
-    function() return Config.Aimlock.TeamCheck and Config.SilentAim.TeamCheck and Config.Hitbox.TeamCheck and Config.Chams.TeamCheck end,
+    function() return Config.AimAssist.TeamCheck and Config.SilentAim.TeamCheck and Config.Hitbox.TeamCheck and Config.ESP.TeamCheck end,
     function(v)
-        Config.Aimlock.TeamCheck = v
+        Config.AimAssist.TeamCheck = v
         Config.SilentAim.TeamCheck = v
         Config.Hitbox.TeamCheck = v
-        Config.Chams.TeamCheck = v
+        Config.ESP.TeamCheck = v
         if silentAimModule and silentAimModule.TeamCheck then
             pcall(function() silentAimModule.TeamCheck(v) end)
         end
     end)
-addToggleToTab(MiscTab, "Wall Check", function() return Config.Aimlock.WallCheck end, function(v) Config.Aimlock.WallCheck = v end)
-addToggleToTab(MiscTab, "Aim Debug", function() return Config.Aimlock.Debug end, function(v) Config.Aimlock.Debug = v end)
+addToggleToTab(MiscTab, "Wall Check", function() return Config.AimAssist.WallCheck end, function(v) Config.AimAssist.WallCheck = v end)
+addToggleToTab(MiscTab, "Aim Debug", function() return Config.AimAssist.Debug end, function(v) Config.AimAssist.Debug = v end)
 
--- Default tab
 for _, t in ipairs(Tabs) do
     t.Button.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
     t.Button.TextColor3 = Color3.fromRGB(180, 180, 180)
@@ -1094,12 +1152,11 @@ Tabs[1].Page.Visible = true
 -- CLEANUP
 --=========================================================
 LocalPlayer.OnTeleport:Connect(function()
-    Config.Aimlock.Enabled = false
+    Config.AimAssist.Enabled = false
+    Config.TriggerBot.Enabled = false
     Config.NoRecoil.Enabled = false
     aimTarget, aimTargetPart = nil, nil
-    pcall(function() RunService:UnbindFromRenderStep("XenoAimlock") end)
-    pcall(function() RunService:UnbindFromRenderStep("XenoNoRecoil") end)
-    for plr, _ in pairs(chamsHighlights) do removeChams(plr) end
+    for plr, _ in pairs(espObjects) do removeESP(plr) end
     if fovCircle then pcall(function() fovCircle:Remove() end) end
     pcall(function() ScreenGui:Destroy() end)
 end)
