@@ -1,5 +1,5 @@
 --[[
-    XenoHub.lua — Full (fixed)
+    XenoHub.lua — Full (final)
     Executor: Xeno (guarded cho executor khác)
 ]]
 
@@ -16,7 +16,6 @@ local CoreGui          = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
 
--- Camera có thể đổi khi respawn → cập nhật
 Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     if Workspace.CurrentCamera then
         Camera = Workspace.CurrentCamera
@@ -116,7 +115,6 @@ end
 
 local function dist(a, b) return (a - b).Magnitude end
 
--- FIX: exclude BOTH my character and target character
 local function hasLineOfSight(fromPart, toPart, targetChar, enabled)
     if not enabled then return true end
     local params = RaycastParams.new()
@@ -129,10 +127,11 @@ local function hasLineOfSight(fromPart, toPart, targetChar, enabled)
 end
 
 --=========================================================
--- AIMLOCK (FIX: BindToRenderStep Camera priority)
+-- AIMLOCK (BindToRenderStep Camera+1)
 --=========================================================
 local aimTarget, aimTargetPart = nil, nil
 local switchCooldown = 0
+local lastDebugPrint = 0
 
 local function findBestTarget()
     local best, bestDist = nil, Config.Aimlock.FOV
@@ -197,13 +196,18 @@ RunService:BindToRenderStep("XenoAimlock", Enum.RenderPriority.Camera.Value + 1,
         return
     end
     updateTarget(dt)
-    if not aimTarget or not aimTargetPart then
-        if Config.Aimlock.Debug then print("[Aimlock] no target") end
-        return
+
+    -- FIX: throttle debug print
+    if Config.Aimlock.Debug and tick() - lastDebugPrint > 0.5 then
+        lastDebugPrint = tick()
+        if aimTarget then
+            print("[Aimlock] target:", aimTarget.Name, "part:", aimTargetPart and aimTargetPart.Name or "nil")
+        else
+            print("[Aimlock] no target")
+        end
     end
-    if Config.Aimlock.Debug then
-        print("[Aimlock] target:", aimTarget.Name, "part:", aimTargetPart.Name)
-    end
+
+    if not aimTarget or not aimTargetPart then return end
     local targetPos = predictPosition(aimTarget, aimTargetPart, Config.Aimlock.Prediction)
     local camPos = Camera.CFrame.Position
     local currentDir = Camera.CFrame.LookVector
@@ -267,15 +271,22 @@ task.spawn(function()
 end)
 
 --=========================================================
--- SILENT AIM
+-- SILENT AIM (with URL failure warn)
 --=========================================================
 local silentAimModule = nil
 pcall(function()
-    silentAimModule = loadstring(game:HttpGet(
-        "https://raw.githubusercontent.com/RapperDeluxe/scripts/main/silent%20aim%20module"
-    ))()
-    if silentAimModule and silentAimModule.TeamCheck then
-        pcall(function() silentAimModule.TeamCheck(Config.SilentAim.TeamCheck) end)
+    local ok, result = pcall(function()
+        return loadstring(game:HttpGet(
+            "https://raw.githubusercontent.com/RapperDeluxe/scripts/main/silent%20aim%20module"
+        ))()
+    end)
+    if ok and result then
+        silentAimModule = result
+        if silentAimModule.TeamCheck then
+            pcall(function() silentAimModule.TeamCheck(Config.SilentAim.TeamCheck) end)
+        end
+    else
+        warn("[XenoHub] Silent Aim module không load được — tính năng Silent Aim tắt")
     end
 end)
 
@@ -390,7 +401,7 @@ end
 installRapidFire()
 
 --=========================================================
--- NO RECOIL (FIX: BindToRenderStep Camera+2)
+-- NO RECOIL (BindToRenderStep Camera+2)
 --=========================================================
 local smoothedCFrame = nil
 RunService:BindToRenderStep("XenoNoRecoil", Enum.RenderPriority.Camera.Value + 2, function()
@@ -416,10 +427,10 @@ RunService:BindToRenderStep("XenoNoRecoil", Enum.RenderPriority.Camera.Value + 2
 end)
 
 --=========================================================
--- ANTI-AIM
+-- ANTI-AIM (Heartbeat + pcall)
 --=========================================================
 local antiAimTime = 0
-RunService.RenderStepped:Connect(function(dt)
+RunService.Heartbeat:Connect(function(dt)
     if not Config.AntiAim.Enabled then return end
     local char = LocalPlayer.Character
     if not char then return end
@@ -434,7 +445,9 @@ RunService.RenderStepped:Connect(function(dt)
         pitch = pitch + (math.random() - 0.5) * j
         roll  = roll  + (math.random() - 0.5) * j
     end
-    hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(pitch, yaw, roll)
+    pcall(function()
+        hrp.CFrame = CFrame.new(hrp.Position) * CFrame.Angles(pitch, yaw, roll)
+    end)
 end)
 
 --=========================================================
@@ -498,7 +511,7 @@ task.spawn(function() while true do task.wait(0.4) refreshAllHitboxes() end end)
 Players.PlayerRemoving:Connect(restoreHitbox)
 
 --=========================================================
--- GODMODE
+-- GODMODE (rawget fix)
 --=========================================================
 local godmodeInstalled = false
 local function installGodmode()
@@ -516,7 +529,8 @@ local function installGodmode()
            and self:IsA("Humanoid") and key == "Health" then
             local myChar = LocalPlayer.Character
             if myChar and self == myChar:FindFirstChildOfClass("Humanoid") then
-                local old = rawget(self, "Health") or self.Health
+                -- FIX: không dùng rawget trên userdata
+                local old = self.Health
                 if type(value) == "number" and type(old) == "number" and value < old then
                     return
                 end
@@ -1080,6 +1094,9 @@ Tabs[1].Page.Visible = true
 -- CLEANUP
 --=========================================================
 LocalPlayer.OnTeleport:Connect(function()
+    Config.Aimlock.Enabled = false
+    Config.NoRecoil.Enabled = false
+    aimTarget, aimTargetPart = nil, nil
     pcall(function() RunService:UnbindFromRenderStep("XenoAimlock") end)
     pcall(function() RunService:UnbindFromRenderStep("XenoNoRecoil") end)
     for plr, _ in pairs(chamsHighlights) do removeChams(plr) end
