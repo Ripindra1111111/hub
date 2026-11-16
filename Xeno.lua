@@ -1,10 +1,6 @@
 --[[
-    XenoHub.lua — Full
+    XenoHub.lua — Full (fixed)
     Executor: Xeno (guarded cho executor khác)
-    Chức năng: Aimlock, Silent Aim, Rapid Fire, No Recoil, Hitbox+,
-               Anti-Aim+, FOV Circle, Chams, Fullbright, FOV Changer,
-               Fix Lag, Speed Hack, Infinite Jump, Godmode, FPS Unlock,
-               Teleport to Player
 ]]
 
 --=========================================================
@@ -19,6 +15,13 @@ local CoreGui          = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
 local Camera      = Workspace.CurrentCamera
+
+-- Camera có thể đổi khi respawn → cập nhật
+Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
+    if Workspace.CurrentCamera then
+        Camera = Workspace.CurrentCamera
+    end
+end)
 
 --=========================================================
 -- EXECUTOR COMPAT
@@ -45,6 +48,7 @@ local Config = {
         Enabled = false, FOV = 150, Smooth = 0.35, SmoothCurve = 2.0,
         MaxTurnSpeed = 12, SwitchDelay = 0.25, Prediction = 0.15,
         Part = "Head", TeamCheck = true, WallCheck = true, MaxDist = 500,
+        Debug = false,
     },
     FixLag = { Enabled = false, ClearTerrain = true, DisableEffects = true, CapFPS = 240 },
     SilentAim = {
@@ -112,17 +116,20 @@ end
 
 local function dist(a, b) return (a - b).Magnitude end
 
-local function hasLineOfSight(fromPart, toPart, enabled)
+-- FIX: exclude BOTH my character and target character
+local function hasLineOfSight(fromPart, toPart, targetChar, enabled)
     if not enabled then return true end
     local params = RaycastParams.new()
-    params.FilterDescendantsInstances = { LocalPlayer.Character }
+    local filter = { LocalPlayer.Character }
+    if targetChar then table.insert(filter, targetChar) end
+    params.FilterDescendantsInstances = filter
     params.FilterType = Enum.RaycastFilterType.Exclude
     local hit = Workspace:Raycast(fromPart.Position, toPart.Position - fromPart.Position, params)
     return hit == nil
 end
 
 --=========================================================
--- AIMLOCK
+-- AIMLOCK (FIX: BindToRenderStep Camera priority)
 --=========================================================
 local aimTarget, aimTargetPart = nil, nil
 local switchCooldown = 0
@@ -141,7 +148,7 @@ local function findBestTarget()
         local myPos = myChar.HumanoidRootPart.Position
         local d = dist(myPos, part.Position)
         if d > Config.Aimlock.MaxDist then continue end
-        if not hasLineOfSight(myChar.HumanoidRootPart, part, Config.Aimlock.WallCheck) then continue end
+        if not hasLineOfSight(myChar.HumanoidRootPart, part, plr.Character, Config.Aimlock.WallCheck) then continue end
         local screen, onScreen = worldToViewport(part.Position)
         if not onScreen then continue end
         local fovDist = (screen - center).Magnitude
@@ -184,13 +191,19 @@ local function updateTarget(dt)
     end
 end
 
-RunService.RenderStepped:Connect(function(dt)
+RunService:BindToRenderStep("XenoAimlock", Enum.RenderPriority.Camera.Value + 1, function(dt)
     if not Config.Aimlock.Enabled then
         aimTarget, aimTargetPart = nil, nil
         return
     end
     updateTarget(dt)
-    if not aimTarget or not aimTargetPart then return end
+    if not aimTarget or not aimTargetPart then
+        if Config.Aimlock.Debug then print("[Aimlock] no target") end
+        return
+    end
+    if Config.Aimlock.Debug then
+        print("[Aimlock] target:", aimTarget.Name, "part:", aimTargetPart.Name)
+    end
     local targetPos = predictPosition(aimTarget, aimTargetPart, Config.Aimlock.Prediction)
     local camPos = Camera.CFrame.Position
     local currentDir = Camera.CFrame.LookVector
@@ -261,7 +274,9 @@ pcall(function()
     silentAimModule = loadstring(game:HttpGet(
         "https://raw.githubusercontent.com/RapperDeluxe/scripts/main/silent%20aim%20module"
     ))()
-    if silentAimModule then silentAimModule.TeamCheck(Config.SilentAim.TeamCheck) end
+    if silentAimModule and silentAimModule.TeamCheck then
+        pcall(function() silentAimModule.TeamCheck(Config.SilentAim.TeamCheck) end)
+    end
 end)
 
 if HAS.HookMeta and HAS.RawMeta and HAS.NewCClosure then
@@ -269,7 +284,7 @@ if HAS.HookMeta and HAS.RawMeta and HAS.NewCClosure then
     oldIndex = hookmetamethod(game, "__index", function(t, k)
         if Config.SilentAim.Enabled and silentAimModule
            and t:IsA("Mouse") and (k == "Hit" or k == "Target")
-           and silentAimModule.Check() then
+           and silentAimModule.Check and silentAimModule.Check() then
             local part = silentAimModule.SelectedPart
             if part then
                 if k == "Hit" then
@@ -343,7 +358,7 @@ local function applyFPS()
 end
 
 --=========================================================
--- RAPID FIRE (universal — hook Tool.Activate)
+-- RAPID FIRE
 --=========================================================
 local rapidFireInstalled = false
 local function installRapidFire()
@@ -375,10 +390,10 @@ end
 installRapidFire()
 
 --=========================================================
--- NO RECOIL (low-pass filter Camera.CFrame)
+-- NO RECOIL (FIX: BindToRenderStep Camera+2)
 --=========================================================
 local smoothedCFrame = nil
-RunService.RenderStepped:Connect(function()
+RunService:BindToRenderStep("XenoNoRecoil", Enum.RenderPriority.Camera.Value + 2, function()
     if not Config.NoRecoil.Enabled then
         smoothedCFrame = Camera.CFrame
         return
@@ -483,7 +498,7 @@ task.spawn(function() while true do task.wait(0.4) refreshAllHitboxes() end end)
 Players.PlayerRemoving:Connect(restoreHitbox)
 
 --=========================================================
--- GODMODE (client-side)
+-- GODMODE
 --=========================================================
 local godmodeInstalled = false
 local function installGodmode()
@@ -700,16 +715,13 @@ local function teleportTo(plr)
 end
 
 --=========================================================
--- UI PARENT (gethui fallback)
+-- UI
 --=========================================================
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "XenoHubUI"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.Parent = (gethui and gethui()) or CoreGui
 
---=========================================================
--- PLAYER LIST UI
---=========================================================
 local PlayerListFrame = Instance.new("Frame")
 PlayerListFrame.Size = UDim2.new(0, 260, 0, 300)
 PlayerListFrame.Position = UDim2.new(0, 320, 0, 20)
@@ -807,9 +819,6 @@ Players.PlayerAdded:Connect(function() task.wait(0.5) refreshPlayerList() end)
 Players.PlayerRemoving:Connect(function() task.wait(0.5) refreshPlayerList() end)
 refreshPlayerList()
 
---=========================================================
--- MAIN UI (3 TABS)
---=========================================================
 local ToggleKey = Enum.KeyCode.RightShift
 
 local Frame = Instance.new("Frame")
@@ -947,9 +956,6 @@ UserInputService.InputBegan:Connect(function(input, gpe)
     if input.KeyCode == ToggleKey then setMenuVisible(not Frame.Visible) end
 end)
 
---=========================================================
--- TAB SYSTEM
---=========================================================
 local Tabs = {}
 local function createTab(name)
     local btn = Instance.new("TextButton")
@@ -1053,9 +1059,12 @@ addToggleToTab(MiscTab, "Team Check",
         Config.SilentAim.TeamCheck = v
         Config.Hitbox.TeamCheck = v
         Config.Chams.TeamCheck = v
-        if silentAimModule then pcall(function() silentAimModule.TeamCheck(v) end) end
+        if silentAimModule and silentAimModule.TeamCheck then
+            pcall(function() silentAimModule.TeamCheck(v) end)
+        end
     end)
 addToggleToTab(MiscTab, "Wall Check", function() return Config.Aimlock.WallCheck end, function(v) Config.Aimlock.WallCheck = v end)
+addToggleToTab(MiscTab, "Aim Debug", function() return Config.Aimlock.Debug end, function(v) Config.Aimlock.Debug = v end)
 
 -- Default tab
 for _, t in ipairs(Tabs) do
@@ -1071,6 +1080,8 @@ Tabs[1].Page.Visible = true
 -- CLEANUP
 --=========================================================
 LocalPlayer.OnTeleport:Connect(function()
+    pcall(function() RunService:UnbindFromRenderStep("XenoAimlock") end)
+    pcall(function() RunService:UnbindFromRenderStep("XenoNoRecoil") end)
     for plr, _ in pairs(chamsHighlights) do removeChams(plr) end
     if fovCircle then pcall(function() fovCircle:Remove() end) end
     pcall(function() ScreenGui:Destroy() end)
